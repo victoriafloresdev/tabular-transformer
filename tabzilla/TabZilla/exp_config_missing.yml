@@ -1,0 +1,39 @@
+# Arquivo: exp_config_missing.yml
+
+# Diretório ONDE tabzilla_experiment.py salvará os JSONs individuais
+# Este caminho é relativo ao local onde tabzilla_experiment.py será executado
+# Usar um caminho absoluto ou relativo bem definido é mais seguro.
+# Vamos usar o caminho absoluto do diretório criado pelo script orquestrador.
+output_dir: !join [ !env EXPERIMENT_RESULTS_DIR, "" ] # Será definido via variável de ambiente
+
+# Configurações de Hardware (AJUSTE CONFORME SEU AMBIENTE)
+use_gpu: True      # Mude para False se não tiver GPU ou não quiser usar
+gpu_ids: [0]       # Lista de IDs das GPUs a serem usadas (se use_gpu=True)
+# data_parallel: False # Geralmente não necessário com um ID de GPU, descomente se tiver múltiplas GPUs e modelos que suportem
+
+# Configurações de HPO (Recomendado: Apenas HPs padrão)
+n_random_trials: 1   # Executa 1 trial (o trial 0 usa HPs padrão)
+n_opt_trials: 0      # Não faz otimização bayesiana
+hparam_seed: 42      # Semente para consistência se n_random_trials > 1
+
+# Configurações de Treinamento (Padrões do TabZilla ou ajuste se necessário)
+batch_size: 128
+val_batch_size: 512 # Maior para validação/teste mais rápidos
+epochs: 1000         # Máximo de épocas (Early stopping controlará na prática)
+early_stopping_rounds: 20
+logging_period: 100 # Frequência de logs durante o treino
+
+# Configurações de Processamento
+scale_numerical_features: "Quantile" # Ou "None". Quantile pode ser mais robusto.
+write_predictions: False           # Não salva predições detalhadas para economizar espaço
+
+# Limites de Tempo (Segundos) - AJUSTE CONFORME NECESSÁRIO
+trial_time_limit: 7200  # Exemplo: 2 horas por validação cruzada de um trial
+# experiment_time_limit: 86400 # Exemplo: 24 horas para todo o HPO (menos relevante com n_trials=1)
+
+# Configurações de Subsetting (Usar dados completos)
+subset_rows: -1
+subset_features: -1
+# subset_rows_method: "random" # Irrelevante com subset_rows = -1
+# subset_features_method: "random" # Irrelevante com subset_features = -1
+# subset_random_seed: 0 # Irrelevante com subset = -1
