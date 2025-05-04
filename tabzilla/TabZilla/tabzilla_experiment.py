@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import NamedTuple
 
 import optuna
+import json
 
 optuna.logging.set_verbosity(optuna.logging.ERROR)
 
@@ -33,13 +34,14 @@ class TabZillaObjective(object):
     """
     adapted from TabSurvey.train.Objective.
     this saves output from each trial.
+    MODIFIED to support loading fixed hyperparameters for trial 0 via fixed_hparams_path.
     """
 
     def __init__(
         self,
         model_handle: BaseModel,
         dataset: TabularDataset,
-        experiment_args: NamedTuple,
+        experiment_args: NamedTuple, # Espera-se que contenha 'fixed_hparams_path'
         hparam_seed: int,
         random_parameters: bool,
         time_limit: int,
@@ -48,7 +50,7 @@ class TabZillaObjective(object):
         self.model_handle = model_handle
 
         self.dataset = dataset
-        self.experiment_args = experiment_args
+        self.experiment_args = experiment_args # Contém todos os args parseados, incluindo o novo
         self.dataset.subset_random_seed = self.experiment_args.subset_random_seed
         # directory where results will be written
         self.output_path = Path(self.experiment_args.output_dir).resolve()
@@ -66,62 +68,89 @@ class TabZillaObjective(object):
         # time limit for any cross-validation cycle (seconds)
         self.time_limit = time_limit
 
-    def __call__(self, trial):
+    def __call__(self, trial: optuna.trial.Trial): # Adicionado type hint para clareza
+        # --- Lógica de Seleção de Hiperparâmetros (MODIFICADA) ---
+        hparam_source = "unknown" # Inicializa
+        trial_params = {}       # Inicializa
+
         if self.random_parameters:
-            # first trial is always default params. after that, sample using either random or optuna suggested hparams
-            if trial.number == 0:
+            # --- INÍCIO DA MODIFICAÇÃO ---
+            # Verifica HPs fixos ESPECIFICAMENTE para o trial 0 no modo "random"
+            # Isso permite que o orquestrador force HPs específicos usando n_random_trials=1
+            # e passando o argumento --fixed_hparams_path
+            if trial.number == 0 and hasattr(self.experiment_args, 'fixed_hparams_path') and self.experiment_args.fixed_hparams_path is not None:
+                try:
+                    hparam_file_path = Path(self.experiment_args.fixed_hparams_path)
+                    if hparam_file_path.is_file():
+                        print(f"  INFO: Attempting to load fixed hyperparameters from {hparam_file_path} for trial 0...")
+                        with open(hparam_file_path, 'r') as f:
+                            trial_params = json.load(f)
+                        hparam_source = f"fixed_json:{hparam_file_path.name}"
+                        print(f"  INFO: Trial 0 using fixed hyperparameters loaded from {hparam_file_path.name}: {trial_params}")
+                    else:
+                        print(f"  WARNING: Fixed hyperparameters file not found: {self.experiment_args.fixed_hparams_path}")
+                        print("  WARNING: Falling back to default parameters for trial 0.")
+                        trial_params = self.model_handle.default_parameters()
+                        hparam_source = "default_fallback_file_not_found"
+
+                except Exception as e:
+                    print(f"  WARNING: Failed to load/parse fixed HPs from {self.experiment_args.fixed_hparams_path}: {e}")
+                    print("  WARNING: Falling back to default parameters for trial 0.")
+                    # Fallback se o JSON falhar
+                    trial_params = self.model_handle.default_parameters()
+                    hparam_source = "default_fallback_load_error"
+
+            # --- FIM DA MODIFICAÇÃO ---
+
+            # Lógica original para trial 0 se HPs fixos não foram fornecidos/carregados com sucesso
+            elif trial.number == 0:
                 trial_params = self.model_handle.default_parameters()
                 hparam_source = "default"
+                print(f"  INFO: Trial 0 using default hyperparameters: {trial_params}")
+            # Lógica original para trials aleatórios subsequentes (se n_random_trials > 1)
             else:
                 trial_params = self.model_handle.get_random_parameters(
                     trial.number + self.hparam_seed * 999
                 )
                 hparam_source = f"random_{trial.number}_s{self.hparam_seed}"
+                print(f"  INFO: Trial {trial.number} using random hyperparameters: {trial_params}")
 
-        else:
+        else: # Modo de otimização do Optuna (n_opt_trials > 0)
+            # Nenhuma mudança aqui para HPs fixos, Optuna controla via suggest_*
+            # Passa experiment_args em vez de None, pode ser útil para alguns modelos
             trial_params = self.model_handle.define_trial_parameters(
-                trial, None
-            )  # the second arg was "args", and is not used by the function. so we will pass None instead
+                trial, self.experiment_args
+            )
             hparam_source = f"sampler_{trial.number}"
+            print(f"  INFO: Trial {trial.number} using Optuna suggested hyperparameters: {trial_params}")
 
-        # Create model
-        # pass a namespace "args" that contains all information needed to initialize the model.
-        # this is a combination of dataset args and parameter search args
-        # in TabSurvey, these were passed through an argparse args object
+        # --- Criação do Modelo e Execução (Sem alterações) ---
+
+        # Cria namespace "args" para inicialização do modelo
+        # (Certifique-se que a definição de arg_namespace está presente no escopo)
         arg_namespace = namedtuple(
             "args",
             [
-                "model_name",
-                "batch_size",
-                "scale_numerical_features",
-                "val_batch_size",
-                "objective",
-                "gpu_ids",
-                "use_gpu",
-                "epochs",
-                "data_parallel",
-                "early_stopping_rounds",
-                "dataset",
-                "cat_idx",
-                "num_features",
-                "subset_features",
-                "subset_rows",
-                "subset_features_method",
-                "subset_rows_method",
-                "cat_dims",
-                "num_classes",
-                "logging_period",
+                "model_name", "batch_size", "scale_numerical_features",
+                "val_batch_size", "objective", "gpu_ids", "use_gpu",
+                "epochs", "data_parallel", "early_stopping_rounds",
+                "dataset", "cat_idx", "num_features", "subset_features",
+                "subset_rows", "subset_features_method", "subset_rows_method",
+                "cat_dims", "num_classes", "logging_period",
+                # Adicione fixed_hparams_path aqui se algum modelo precisar dele diretamente
+                # "fixed_hparams_path",
             ],
         )
 
-        # if model class has epochs defined, use this number. otherwise, use the num epochs passed in args.
+        # Determina épocas máximas
         if hasattr(self.model_handle, "default_epochs"):
             max_epochs = self.model_handle.default_epochs
         else:
             max_epochs = self.experiment_args.epochs
 
+        # Cria o objeto args
         args = arg_namespace(
-            model_name=self.model_handle.__name__, # Use o nome da classe do modelo
+            model_name=self.model_handle.__name__,
             batch_size=self.experiment_args.batch_size,
             val_batch_size=self.experiment_args.val_batch_size,
             scale_numerical_features=self.experiment_args.scale_numerical_features,
@@ -132,7 +161,7 @@ class TabZillaObjective(object):
             early_stopping_rounds=self.experiment_args.early_stopping_rounds,
             logging_period=self.experiment_args.logging_period,
             objective=self.dataset.target_type,
-            dataset=self.dataset.name, # Use o nome do dataset carregado
+            dataset=self.dataset.name,
             cat_idx=self.dataset.cat_idx,
             num_features=self.dataset.num_features,
             subset_features=self.experiment_args.subset_features,
@@ -141,13 +170,18 @@ class TabZillaObjective(object):
             subset_rows_method=self.experiment_args.subset_rows_method,
             cat_dims=self.dataset.cat_dims,
             num_classes=self.dataset.num_classes,
+            # fixed_hparams_path=self.experiment_args.fixed_hparams_path, # Descomente se necessário
         )
 
-        # parameterized model
+        # Instancia o modelo parametrizado
+        # Passa os trial_params determinados acima
         model = self.model_handle(trial_params, args)
 
-        # Cross validate the chosen hyperparameters
+        # Cross valida os hiperparâmetros escolhidos
+        result = None # Inicializa result
+        obj_val = None  # Inicializa obj_val
         try:
+            print(f"  INFO: Starting cross-validation for trial {trial.number}...")
             result = cross_validation(
                 model,
                 self.dataset,
@@ -155,81 +189,92 @@ class TabZillaObjective(object):
                 scaler=args.scale_numerical_features,
                 args=args, # Passa os args (incluindo info do dataset) para cross_validation
             )
-            obj_val = result.scorers["val"].get_objective_result()
+            # Verifica se 'val' existe nos scorers antes de chamar get_objective_result
+            if "val" in result.scorers and result.scorers["val"]:
+                 obj_val = result.scorers["val"].get_objective_result()
+                 print(f"  INFO: Cross-validation complete. Objective value: {obj_val}")
+            else:
+                 print("  WARNING: 'val' scorer not found or empty in results. Setting objective value to None.")
+                 obj_val = None # Ou um valor padrão indicando falha, ex: float('-inf') para maximização
+
         except Exception as e:
-            print(f"caught exception during cross-validation...")
+            print(f"  ERROR: Caught exception during cross-validation for trial {trial.number}: {e}")
             tb = traceback.format_exc()
+            # Cria um objeto ExperimentResult mesmo em caso de falha para salvar metadados
+            # Garante que 'model' existe (foi instanciado antes do try)
             result = ExperimentResult(
                 dataset=self.dataset,
                 scaler=args.scale_numerical_features,
-                model=model,
+                model=model, # Salva o modelo instanciado
                 timers={},
                 scorers={},
                 predictions=None,
                 probabilities=None,
                 ground_truth=None,
             )
-            result.exception = tb
-            obj_val = None
+            result.exception = tb # Salva o traceback
+            # Define obj_val como None ou um valor indicando falha para o Optuna
+            obj_val = None # Ou float('-inf') / float('inf') dependendo da direção
             print(tb)
 
-        # add info about the hyperparams and trial number
-        result.hparam_source = hparam_source
-        result.trial_number = trial.number
-        result.experiment_args = vars(self.experiment_args)
+        # --- Armazenamento do Resultado (Sem alterações, mas garante que 'result' existe) ---
+        if result is not None:
+            # Adiciona informações sobre hiperparâmetros e trial ao resultado
+            result.hparam_source = hparam_source
+            result.trial_number = trial.number
+            # Salva os parâmetros realmente usados neste trial
+            result.params_used = trial_params # Adiciona os parâmetros ao objeto de resultado
+            # Salva os argumentos gerais do experimento
+            # Corrigido typo: experiment_args em vez de experiemnt_args
+            result.experiment_args = vars(self.experiment_args)
 
+            # Lógica de salvamento do arquivo JSON (com tratamento de nome de arquivo)
+            safe_dataset_name = self.dataset.name.replace(os.sep, "_").replace("/", "_") # Garante substituição
+            safe_model_name = self.model_handle.__name__.replace(os.sep, "_").replace("/", "_")
 
-        # <<< INÍCIO DA MODIFICAÇÃO PARA CORRIGIR ERRO DE ARQUIVO EXISTENTE >>>
-        # Cria um caminho de saída específico para esta execução (dataset/modelo)
-        # Usa self.dataset.name (que vem do TabularDataset lido) e o nome da classe do modelo
-        # Substitui caracteres inválidos para nomes de diretório (ex: '/') por um substituto seguro
-        # Modify the result_file_base definition to include missing percentage info from dataset name
-        safe_dataset_name = self.dataset.name.replace(os.sep, "_")
-        safe_model_name = self.model_handle.__name__.replace(os.sep, "_")
+            missing_info = ""
+            if "_missing" in safe_dataset_name:
+                parts = safe_dataset_name.split("_")
+                for i, part in enumerate(parts):
+                    if part.endswith("pct") and i + 1 < len(parts) and parts[i + 1] == "missing":
+                        missing_info = f"_{part}"
+                        break
 
-        # Extract missing percentage from dataset name if present
-        missing_info = ""
-        if "_missing" in safe_dataset_name:
-            # Try to extract percentage from names like "dataset_25pct_missing"
-            parts = safe_dataset_name.split("_")
-            for i, part in enumerate(parts):
-                if part.endswith("pct") and i+1 < len(parts) and parts[i+1] == "missing":
-                    missing_info = f"_{part}"
-                    break
+            run_specific_output_dir = self.output_path / safe_dataset_name / safe_model_name
+            run_specific_output_dir.mkdir(parents=True, exist_ok=True)
 
-        run_specific_output_dir = self.output_path / safe_dataset_name / safe_model_name
-        run_specific_output_dir.mkdir(parents=True, exist_ok=True)
+            result_file_base = run_specific_output_dir / f"{hparam_source}{missing_info}_trial{trial.number}"
 
-        # Define the name base of the file WITHIN the specific directory
-        # Include missing percentage in filename to avoid conflicts
-        result_file_base = run_specific_output_dir.joinpath(
-            f"{hparam_source}{missing_info}_trial{trial.number}"
-        )
-
-        # Also modify the write method call to handle existing files
-        try:
-            result.write(
-                result_file_base,
-                write_predictions=self.experiment_args.write_predictions,
-                compress=False,
-            )
-        except AssertionError as e:
-            if "file already exists" in str(e):
-                # If file exists, append a timestamp or unique identifier
-                import time
-                unique_suffix = int(time.time() * 1000) % 10000  # Last 4 digits of timestamp in ms
-                result_file_base = run_specific_output_dir.joinpath(
-                    f"{hparam_source}{missing_info}_trial{trial.number}_run{unique_suffix}"
-                )
-                print(f"File exists, writing to alternative path: {result_file_base}")
+            try:
+                print(f"  INFO: Writing results to {result_file_base}_results.json...")
                 result.write(
                     result_file_base,
                     write_predictions=self.experiment_args.write_predictions,
                     compress=False,
                 )
-            else:
-                raise
+            except AssertionError as e:
+                if "file already exists" in str(e).lower(): # Checagem mais robusta
+                    import time
+                    unique_suffix = int(time.time() * 1000) % 10000
+                    result_file_base = run_specific_output_dir / f"{hparam_source}{missing_info}_trial{trial.number}_run{unique_suffix}"
+                    print(f"  WARNING: File exists, writing to alternative path: {result_file_base}_results.json")
+                    result.write(
+                        result_file_base,
+                        write_predictions=self.experiment_args.write_predictions,
+                        compress=False,
+                    )
+                else:
+                    print(f"  ERROR: Failed to write results due to AssertionError: {e}")
+                    raise # Re-levanta outras assertion errors
+            except Exception as e:
+                 print(f"  ERROR: Failed to write results: {e}")
+                 # Não re-levanta para permitir que o Optuna continue, mas registra o erro
 
+        else:
+             print("  ERROR: Result object is None, cannot save results.")
+
+
+        # Retorna o valor objetivo para o Optuna
         return obj_val
 
 

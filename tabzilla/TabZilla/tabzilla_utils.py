@@ -474,4 +474,13 @@ def get_experiment_parser():
         default=0,
         help="Random seed for subset selection.",
     )
+
+    experiment_parser.add_argument(
+        "--fixed_hparams_path",
+        type=str,
+        default=None, # Default é não usar HPs fixos
+        help="Path to a JSON file containing fixed hyperparameters to use for trial 0 "
+            "(overrides defaults if provided and n_random_trials=1, n_opt_trials=0)."
+    )
+
     return experiment_parser
