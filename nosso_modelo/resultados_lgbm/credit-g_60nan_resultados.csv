@@ -1,0 +1,2 @@
+accuracy,precision_macro,recall_macro,f1_macro,TN,FP,FN,TP
+0.66,0.5831600831600832,0.5761904761904761,0.5783730158730158,11,19,15,55
